@@ -14,50 +14,32 @@ Function CheckReturnCodeOfPreviousCommand($msg) {
   }
 }
 
-Function GetVersion() {
-  $gitCommand = Get-Command -Name git
-
-  try { $tag = & $gitCommand describe --exact-match --tags HEAD } catch { }
-  if(-Not $?) {
-      Info "The commit is not tagged. Use 'v0.0-dev' as a version instead"
-      $tag = "v0.0-dev"
-  }
-
-  $commitHash = & $gitCommand rev-parse --short HEAD
-  CheckReturnCodeOfPreviousCommand "Failed to get git commit hash"
-
-  return "$($tag.Substring(1))-$commitHash"
-}
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $root = Resolve-Path "$PSScriptRoot"
 $buildDir = "$root/build"
-
-$gitCommand = Get-Command -Name git
 
 Info "Find Visual Studio installation path"
 $vswhereCommand = Get-Command -Name "${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $installationPath = & $vswhereCommand -prerelease -latest -property installationPath
 
 Info "Open Visual Studio 2022 Developer PowerShell"
-& "$installationPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64
+& "$installationPath\Common7\Tools\Launch-VsDevShell.ps1" -SkipAutomaticLocation -Arch amd64
 
 Info "Remove '$buildDir' folder if it exists"
 Remove-Item $buildDir -Force -Recurse -ErrorAction SilentlyContinue
 New-Item $buildDir -Force -ItemType "directory" > $null
 
-Info "Clone re2c repo"
-& $gitCommand clone --branch 4.0 --single-branch https://github.com/skvadrik/re2c.git $buildDir/re2c-repo
-
-Info "Change the minimal Cmake version to allow specifying CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
-(Get-Content $buildDir/re2c-repo/CMakeLists.txt) -replace "^cmake_minimum_required\(VERSION .+\)$", "cmake_minimum_required(VERSION 3.28)" | Set-Content $buildDir/re2c-repo/CMakeLists.txt
+Info "Download re2c source code"
+Invoke-WebRequest -Uri https://github.com/skvadrik/re2c/archive/refs/tags/4.3.zip -OutFile "$buildDir/re2c-source-code.zip"
+[System.IO.Compression.ZipFile]::ExtractToDirectory("$buildDir/re2c-source-code.zip", "$buildDir")
 
 Info "Cmake generate cache"
 cmake `
-  -S $buildDir/re2c-repo `
+  -S $buildDir/re2c-4.3 `
   -B $buildDir/out `
   -G Ninja `
   -D CMAKE_BUILD_TYPE=Release `
@@ -79,11 +61,7 @@ Info "Cmake build"
 cmake --build $buildDir/out
 CheckReturnCodeOfPreviousCommand "cmake build failed"
 
-Info "Generate version number"
-$re2cShortGitCommitHash = & $gitCommand -C "$buildDir/re2c-repo" rev-parse --short HEAD
-$re2cNearestTagName = & $gitCommand -C "$buildDir/re2c-repo" describe --tags --abbrev=0
-
 Info "Copy the executables to the publish directory and archive them"
 New-Item $buildDir/publish -Force -ItemType "directory" > $null
 Copy-Item -Path $buildDir/out/re2c.exe -Destination $buildDir/publish
-Compress-Archive -Path "$buildDir/publish/*.exe" -DestinationPath $buildDir/publish/re2c-v$re2cNearestTagName-$re2cShortGitCommitHash.zip
+Compress-Archive -Path "$buildDir/publish/*.exe" -DestinationPath $buildDir/publish/re2c.zip
